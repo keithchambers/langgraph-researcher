@@ -18,7 +18,7 @@ A sophisticated multi-agent research system that dynamically routes questions th
 - **Pattern Selection**: Optimal research strategy based on question characteristics
 
 ### Capabilities
-- **Web Search Integration**: DuckDuckGo search with parallel execution
+- **Web Search Integration**: Brave Search API with LLM knowledge fallback
 - **Mathematical Processing**: Built-in calculation engine
 - **Parallel Research**: Concurrent query execution for efficiency
 - **Performance Testing**: Comprehensive timing analysis framework
@@ -35,6 +35,11 @@ ollama pull qwen2.5:0.5b
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# Optional: Set Brave Search API key for web search
+export BRAVE_API_KEY="your_brave_api_key_here"
+# Get your free API key from: https://api.search.brave.com/
+# Note: If not set, the app will fall back to LLM knowledge
 
 # Run with direct question
 python supervisor_ollama.py "What are the environmental impacts of electric vehicles?"
@@ -120,8 +125,14 @@ python performance_test.py -q 10 -i 5 -p 3
 
 ### Environment Variables
 ```bash
-export OLLAMA_MODEL=qwen2.5:0.5b  # Model selection
+export OLLAMA_MODEL=qwen2.5:0.5b       # Model selection
+export BRAVE_API_KEY="your_api_key"    # Optional: Brave Search API key
 ```
+
+### Search Configuration
+- **With BRAVE_API_KEY**: Uses Brave Search API for current web results
+- **Without API key**: Falls back to LLM knowledge (may have knowledge cutoff limitations)
+- **API Key Setup**: Get free API key from https://api.search.brave.com/
 
 ### Model Options
 - `qwen2.5:0.5b` - Fast, lightweight (default)
@@ -173,10 +184,11 @@ python performance_test.py -q 8  # dynamic mode
 
 ```
 langgraph>=0.0.35
-langgraph-supervisor>=0.0.4
+langchain-ollama>=0.1.0
 langchain-community>=0.2.0
-duckduckgo-search>=8.0.0
-ollama>=0.1.7
+langchain-core>=0.2.0
+brave-search>=1.0.0
+requests>=2.31.0
 ```
 
 ## Contributing

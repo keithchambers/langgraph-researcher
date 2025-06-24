@@ -2,4 +2,5 @@ langgraph>=0.0.35
 langchain-ollama>=0.1.0
 langchain-community>=0.2.0
 langchain-core>=0.2.0
-duckduckgo-search>=8.0.0
+brave-search>=1.0.0
+requests>=2.31.0

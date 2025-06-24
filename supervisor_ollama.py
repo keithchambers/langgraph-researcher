@@ -3,7 +3,7 @@
 LangGraph Research Orchestrator
 
 A multi-agent research system that routes questions through different analysis patterns
-based on complexity and domain. Supports web search, mathematical operations, and
+based on complexity and domain. Supports web search with Brave API, mathematical operations, and
 various research methodologies including validation chains and adversarial loops.
 """
 
@@ -12,13 +12,12 @@ import time
 import re
 import signal
 import functools
+import requests
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from duckduckgo_search import DDGS
 from langchain.tools import Tool
-from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
 
@@ -70,6 +69,126 @@ def safe_search_operation(search_func, query, timeout_seconds=15):
     except Exception as e:
         print(f"[ERROR] Search operation failed: {str(e)}")
         return f"Search failed for {query}: {str(e)}"
+
+
+def brave_search_with_fallback(query: str, llm: ChatOllama = None, timeout_seconds: int = 15) -> str:
+    """
+    Search using Brave Search API with fallback to LLM knowledge.
+    
+    Args:
+        query: Search query string
+        llm: LLM instance for fallback
+        timeout_seconds: Timeout for the search operation
+        
+    Returns:
+        Search results as string
+    """
+    # Check for Brave API key
+    brave_api_key = os.getenv("BRAVE_API_KEY")
+    
+    if brave_api_key:
+        try:
+            print(f"[BRAVE SEARCH] Using Brave Search API for: {query}")
+            
+            # Brave Search API endpoint
+            url = "https://api.search.brave.com/res/v1/web/search"
+            headers = {
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "X-Subscription-Token": brave_api_key
+            }
+            params = {
+                "q": query,
+                "count": 10,
+                "offset": 0,
+                "safesearch": "moderate",
+                "freshness": "py",  # Past year
+                "text_decorations": False,
+                "search_lang": "en",
+                "country": "us"
+            }
+            
+            # Make API request with timeout
+            response = requests.get(url, headers=headers, params=params, timeout=timeout_seconds)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Extract and format results
+            results = []
+            if "web" in data and "results" in data["web"]:
+                for result in data["web"]["results"][:5]:  # Top 5 results
+                    title = result.get("title", "")
+                    description = result.get("description", "")
+                    url = result.get("url", "")
+                    
+                    formatted_result = f"Title: {title}\nDescription: {description}\nURL: {url}"
+                    results.append(formatted_result)
+            
+            if results:
+                return "\n\n".join(results)
+            else:
+                print("[BRAVE SEARCH] No results found, falling back to LLM")
+                return brave_search_llm_fallback(query, llm)
+                
+        except requests.exceptions.Timeout:
+            print(f"[BRAVE SEARCH] API request timed out after {timeout_seconds}s, falling back to LLM")
+            return brave_search_llm_fallback(query, llm)
+        except requests.exceptions.RequestException as e:
+            print(f"[BRAVE SEARCH] API request failed: {str(e)}, falling back to LLM")
+            return brave_search_llm_fallback(query, llm)
+        except Exception as e:
+            print(f"[BRAVE SEARCH] Unexpected error: {str(e)}, falling back to LLM")
+            return brave_search_llm_fallback(query, llm)
+    else:
+        print("[BRAVE SEARCH] No BRAVE_API_KEY found, using LLM knowledge")
+        return brave_search_llm_fallback(query, llm)
+
+
+def brave_search_llm_fallback(query: str, llm: ChatOllama = None) -> str:
+    """
+    Fallback to LLM knowledge when Brave Search API is unavailable.
+    
+    Args:
+        query: Search query string
+        llm: LLM instance
+        
+    Returns:
+        LLM-generated response based on its knowledge
+    """
+    if llm is None:
+        return f"Search unavailable for query: {query}. Please provide information or try again with an API key."
+    
+    try:
+        print(f"[LLM FALLBACK] Using LLM knowledge for: {query}")
+        
+        fallback_prompt = f"""
+        I need information about: "{query}"
+        
+        Please provide comprehensive information based on your knowledge. Include:
+        1. Key facts and details
+        2. Multiple perspectives if applicable
+        3. Important context or background
+        4. Recent developments if known (note any knowledge cutoff limitations)
+        
+        Format your response as if it were search results, providing detailed and informative content.
+        """
+        
+        response = safe_llm_invoke(llm, fallback_prompt, 20)
+        return f"[LLM Knowledge Response]\n{response.content}"
+        
+    except (TimeoutError, Exception) as e:
+        print(f"[LLM FALLBACK] Failed: {str(e)}")
+        return f"Unable to retrieve information for query: {query}. Error: {str(e)}"
+
+
+def create_brave_search_tool(llm: ChatOllama):
+    """Create a Brave Search tool function for LangGraph agents."""
+    def brave_search_tool(query: str) -> str:
+        """Search the web for information using Brave Search API with LLM fallback."""
+        return brave_search_with_fallback(query, llm)
+    
+    return brave_search_tool
 
 
 class QuestionComplexity(Enum):
@@ -219,13 +338,12 @@ def create_research_plan(question: str, llm: ChatOllama, max_queries: int = 3) -
         return [question]  # Fallback to original question
 
 
-def execute_parallel_search(queries: List[str], max_workers: int = 3, timeout: int = 20) -> Dict[str, str]:
-    """Execute multiple search queries in parallel with timeout."""
-    search = DuckDuckGoSearchRun()
+def execute_parallel_search(queries: List[str], max_workers: int = 3, timeout: int = 20, llm: ChatOllama = None) -> Dict[str, str]:
+    """Execute multiple search queries in parallel with timeout using Brave Search with LLM fallback."""
     
     def search_single_query(query: str) -> tuple[str, str]:
         try:
-            result = safe_search_operation(search.run, query, 15)
+            result = brave_search_with_fallback(query, llm, 15)
             return query, result
         except Exception as e:
             return query, f"Search failed: {str(e)}"
@@ -274,7 +392,7 @@ def sequential_chain(question: str, llm: ChatOllama) -> ResearchResult:
     # Step 1: Initial research
     print("[STEP 1] Initial research...")
     initial_queries = create_research_plan(question, llm, max_queries=2)
-    initial_results = execute_parallel_search(initial_queries)
+    initial_results = execute_parallel_search(initial_queries, llm=llm)
     
     # Step 2: Follow-up research
     print("[STEP 2] Follow-up research...")
@@ -293,7 +411,7 @@ def sequential_chain(question: str, llm: ChatOllama) -> ResearchResult:
     except (TimeoutError, Exception) as e:
         print(f"[ERROR] Follow-up generation failed: {str(e)}")
         followup_queries = []
-    followup_results = execute_parallel_search(followup_queries)
+    followup_results = execute_parallel_search(followup_queries, llm=llm)
     
     # Step 3: Synthesis
     print("[STEP 3] Final synthesis...")
@@ -317,7 +435,7 @@ def validation_chain(question: str, llm: ChatOllama) -> ResearchResult:
     # Step 1: Primary research
     print("[STEP 1] Primary research...")
     queries = create_research_plan(question, llm, max_queries=3)
-    results = execute_parallel_search(queries)
+    results = execute_parallel_search(queries, llm=llm)
     
     # Step 2: Credibility validation
     print("[STEP 2] Credibility validation...")
@@ -391,7 +509,7 @@ def refinement_chain(question: str, llm: ChatOllama, max_iterations: int = 2) ->
             queries = [line.strip() for line in gap_response.split('\n') if line.strip()][:2]
         
         # Execute searches
-        results = execute_parallel_search(queries)
+        results = execute_parallel_search(queries, llm=llm)
         all_sources.extend(results.keys())
         
         # Update answer
@@ -500,7 +618,7 @@ def improvement_loop(question: str, llm: ChatOllama, max_iterations: int = 2) ->
             query_lines = [line.strip() for line in assessment.split('\n') if '?' in line][:2]
             
             if query_lines:
-                improvement_results = execute_parallel_search(query_lines)
+                improvement_results = execute_parallel_search(query_lines, llm=llm)
                 
                 # Enhance the answer
                 enhancement_prompt = f"""
@@ -543,7 +661,7 @@ def adversarial_loop(question: str, llm: ChatOllama, max_rounds: int = 2) -> Res
         
         # Research counter-arguments
         counter_queries = [line.strip() for line in counter_response.split('\n') if line.strip()][:2]
-        counter_results = execute_parallel_search(counter_queries)
+        counter_results = execute_parallel_search(counter_queries, llm=llm)
         all_sources.extend(counter_results.keys())
         
         # Refine answer considering counter-arguments
@@ -615,7 +733,7 @@ def clarification_chain(question: str, llm: ChatOllama, interactive: bool = True
     # Step 4: Execute refined research
     print("[STEP 4] Executing refined research...")
     queries = create_research_plan(question, llm, max_queries=3)
-    results = execute_parallel_search(queries)
+    results = execute_parallel_search(queries, llm=llm)
     
     # Step 5: Synthesize with context
     print("[STEP 5] Synthesizing with clarification context...")
@@ -666,7 +784,7 @@ def followup_chain(question: str, llm: ChatOllama, initial_research: ResearchRes
     
     # Step 3: Research follow-up questions
     print("[STEP 3] Researching follow-up questions...")
-    followup_results = execute_parallel_search(followup_questions)
+    followup_results = execute_parallel_search(followup_questions, llm=llm)
     
     # Step 4: Comprehensive synthesis
     print("[STEP 4] Comprehensive synthesis...")
@@ -698,16 +816,8 @@ def interactive_report_chain(question: str, llm: ChatOllama, learning_iterations
     
     # Step 1: Initial research
     print("[STEP 1] Conducting research...")
-    research_results = {}
     queries = create_research_plan(question, llm, max_queries=4)
-    
-    for query in queries:
-        try:
-            search = DuckDuckGoSearchRun()
-            result = search.run(query)
-            research_results[query] = result
-        except Exception as e:
-            research_results[query] = f"Search error: {str(e)}"
+    research_results = execute_parallel_search(queries, llm=llm)
     
     # Step 2: Generate initial report
     print("[STEP 2] Generating initial report...")
@@ -791,10 +901,10 @@ def build_agents(model_name: str = "qwen2.5:0.5b"):
     llm = ChatOllama(model=model_name, temperature=0)
 
     # Research agent with web search
-    web_search = DuckDuckGoSearchRun()
+    web_search = create_brave_search_tool(llm)
     research_tools = [web_search]
     research_prompt = (
-        "You are a research agent. Use the duckduckgo_search tool to find information, "
+        "You are a research agent. Use the brave_search_tool to find information, "
         "then provide comprehensive answers based on search results."
     )
     
@@ -810,7 +920,7 @@ def build_agents(model_name: str = "qwen2.5:0.5b"):
         """Execute comprehensive parallel research plan."""
         try:
             queries = create_research_plan(question, llm)
-            search_results = execute_parallel_search(queries)
+            search_results = execute_parallel_search(queries, llm=llm)
             final_answer = synthesize_research_results(question, search_results, llm)
             return final_answer
         except Exception as e:
@@ -956,7 +1066,7 @@ def research_orchestrator(question: str, llm):
         if analysis.complexity == QuestionComplexity.SIMPLE:
             print("[ROUTING] → Simple parallel research")
             queries = create_research_plan(question, llm, max_queries=3)
-            results = execute_parallel_search(queries)
+            results = execute_parallel_search(queries, llm=llm)
             return synthesize_research_results(question, results, llm)
         
         elif analysis.complexity == QuestionComplexity.MEDIUM:
@@ -979,7 +1089,7 @@ def research_orchestrator(question: str, llm):
             print("[ROUTING] → Standard parallel research")
             check_timeout()  # Check timeout before final operations
             queries = create_research_plan(question, llm, max_queries=4)
-            results = execute_parallel_search(queries)
+            results = execute_parallel_search(queries, llm=llm)
             return synthesize_research_results(question, results, llm)
     except TimeoutError as e:
         print(f"[TIMEOUT] Research orchestrator timed out: {str(e)}")
@@ -1015,7 +1125,7 @@ def research_orchestrator_with_patterns(question: str, llm, pattern: str = "auto
             print("[FORCED ROUTING] → Simple parallel research")
             check_timeout()
             queries = create_research_plan(question, llm, max_queries=3)
-            results = execute_parallel_search(queries)
+            results = execute_parallel_search(queries, llm=llm)
             return synthesize_research_results(question, results, llm)
         elif pattern == "medium":
             print("[FORCED ROUTING] → Sequential chain pattern")
